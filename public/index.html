@@ -538,7 +538,444 @@ function handleWSMessage(data) {
                 state.balance = data.balance;
                 document.getElementById('balanceDisplay').textContent = `$${data.balance.toFixed(2)}`;
             }
+            break;case 'trade_closed':
+            state.activeTrades--;
+            state.dailyPnL = data.dailyPnL;
+            state.dailyTrades = data.dailyTrades;
+            state.trades.unshift(data.trade);
+            
+            document.getElementById('activeTradeCount').textContent = state.activeTrades;
+            updateDailyPnL();
+            renderTradeLog();
+            
+            const emoji = data.trade.status === 'won' ? '✅' : '❌';
+            showToast(`${emoji} ${data.trade.contract_type} ${data.trade.status} | PnL: $${data.trade.profit?.toFixed(2)}`, 
+                data.trade.status === 'won' ? 'success' : 'error');
             break;
+
+        case 'trading_stopped':
+            state.isTrading = false;
+            updateAutoTradeUI();
+            showToast(`Trading stopped: ${data.reason}`, 'info');
+            break;
+
+        case 'error':
+            console.error('[WS] Server error:', data.error);
+            showToast(`Error: ${data.error?.message || 'Unknown'}`, 'error');
+            break;
+
+        case 'balance':
+            state.balance = data.balance;
+            document.getElementById('balanceDisplay').textContent = `$${data.balance.toFixed(2)}`;
+            break;
+    }
+}
+
+// ================================================================
+// UI UPDATES
+// ================================================================
+function updateConnectionStatus(connected, authenticated = false) {
+    const container = document.getElementById('connStatus');
+    const dot = document.getElementById('connDot');
+    const text = document.getElementById('connText');
+    const footerStatus = document.getElementById('footerStatus');
+
+    if (connected && authenticated) {
+        container.className = 'conn-status connected';
+        dot.className = 'conn-dot on';
+        text.textContent = 'Live • Authenticated';
+        footerStatus.textContent = 'Connected & Authenticated';
+        document.getElementById('balanceDisplay').style.display = 'inline-block';
+    } else if (connected) {
+        container.className = 'conn-status connected';
+        dot.className = 'conn-dot on';
+        text.textContent = 'Connected • Awaiting Auth';
+        footerStatus.textContent = 'Connected (not authenticated)';
+    } else {
+        container.className = 'conn-status disconnected';
+        dot.className = 'conn-dot off';
+        text.textContent = 'Disconnected';
+        footerStatus.textContent = 'Disconnected';
+    }
+}
+
+function updateDailyPnL() {
+    const pnlEl = document.getElementById('dailyPnL');
+    pnlEl.textContent = `$${state.dailyPnL.toFixed(2)}`;
+    pnlEl.className = `value ${state.dailyPnL >= 0 ? 'green' : 'red'}`;
+    document.getElementById('dailyTradeCount').textContent = `${state.dailyTrades} trades today`;
+}
+
+function updateAutoTradeUI() {
+    const btn = document.getElementById('autoTradeBtn');
+    if (state.isTrading) {
+        btn.textContent = '⏸ Auto-Trading Active';
+        btn.className = 'btn btn-danger';
+        document.getElementById('stopTradeBtn').disabled = false;
+        document.getElementById('tradeStatusDisplay').textContent = '● Trading';
+        document.getElementById('tradeStatusDisplay').className = 'version-tag red';
+    } else {
+        btn.textContent = '▶ Start Auto-Trade';
+        btn.className = 'btn btn-warning';
+        document.getElementById('stopTradeBtn').disabled = true;
+        document.getElementById('tradeStatusDisplay').textContent = '● Idle';
+        document.getElementById('tradeStatusDisplay').className = 'version-tag green';
+    }
+}
+
+// ================================================================
+// SIGNAL UPDATE
+// ================================================================
+function updateSignal(signal) {
+    if (!signal) return;
+    state.lastSignal = signal;
+
+    // Update stats bar
+    document.getElementById('over2Rate').textContent = signal.over2Pct ? `${signal.over2Pct}%` : '—';
+    document.getElementById('under7Rate').textContent = signal.under7Pct ? `${signal.under7Pct}%` : '—';
+
+    // Signal display
+    const container = document.getElementById('signalContainer');
+    let badgeClass = 'wait';
+    let badgeText = '⏳ WAITING';
+    if (signal.action === 'OVER') { badgeClass = 'over'; badgeText = '📈 OVER 2'; }
+    else if (signal.action === 'UNDER') { badgeClass = 'under'; badgeText = '📉 UNDER 7'; }
+
+    container.innerHTML = `
+        <div class="signal-box">
+            <div class="signal-title">Live Signal — ${signal.symbol}</div>
+            <div class="signal-main">
+                <span class="action-badge ${badgeClass}">${badgeText}</span>
+                <span style="font-size:18px;font-weight:600;">${signal.prediction || 'Analyzing...'}</span>
+                <span style="font-size:14px;color:#8b949e;">Conf: ${signal.confidence || 0}%</span>
+            </div>
+            <div class="signal-detail">
+                <span class="dt">Last Digit:</span><span class="dd" style="font-weight:700;font-size:18px;">${signal.lastDigit >= 0 ? signal.lastDigit : '—'}</span>
+                <span class="dt">Over 2 Confidence:</span><span class="dd">${signal.over2Conf || 0}% (actual rate: ${signal.over2Pct || 0}%)</span>
+                <span class="dt">Under 7 Confidence:</span><span class="dd">${signal.under7Conf || 0}% (actual rate: ${signal.under7Pct || 0}%)</span>
+                <span class="dt">Analysis Window:</span><span class="dd">${signal.windowSize || 0} ticks</span>
+                <span class="dt">Payout (Over 2):</span><span class="dd" style="color:#3fb950;">+40.85% stake</span>
+                <span class="dt">Payout (Under 7):</span><span class="dd" style="color:#58a6ff;">+40.85% stake</span>
+                <span class="dt">Recommendation:</span><span class="dd" style="color:${signal.action === 'WAIT' ? '#d29922' : signal.action === 'OVER' ? '#3fb950' : '#58a6ff'};font-weight:600;">${signal.recommendation || 'Analyzing...'}</span>
+            </div>
+        </div>
+    `;
+
+    // Render entries
+    if (signal.entries) renderEntries(signal.entries);
+    
+    // Update digit frequencies if available
+    if (signal.digitFrequencies) {
+        renderProbGrid(signal.digitFrequencies);
+    }
+}
+
+// ================================================================
+// PROBABILITY GRID
+// ================================================================
+function renderProbGrid(frequencies) {
+    const grid = document.getElementById('probGrid');
+    if (!frequencies) {
+        // Static default
+        grid.innerHTML = '';
+        for (let d = 0; d <= 9; d++) {
+            const overWin = d > 2;
+            const underWin = d < 7;
+            const isBarrier = d === 2 || d === 7;
+            const cell = document.createElement('div');
+            cell.className = 'prob-cell' + (isBarrier ? ' highlight' : '');
+            cell.style.cssText = 'background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 6px;text-align:center;';
+            cell.innerHTML = `
+                <div style="font-size:22px;font-weight:700;color:${isBarrier ? '#f0883e' : overWin ? '#3fb950' : underWin ? '#58a6ff' : '#8b949e'}">
+                    ${d}${isBarrier ? d === 2 ? ' ▲' : ' ▼' : ''}
+                </div>
+                <div style="font-size:13px;font-weight:600;color:#3fb950;">${overWin ? '✓ Over' : '—'}</div>
+                <div style="font-size:13px;font-weight:600;color:#58a6ff;">${underWin ? '✓ Under' : '—'}</div>
+            `;
+            if (isBarrier) cell.style.borderColor = '#f0883e';
+            grid.appendChild(cell);
+        }
+        return;
+    }
+
+    grid.innerHTML = '';
+    frequencies.forEach(f => {
+        const d = f.digit;
+        const overWin = d > 2;
+        const underWin = d < 7;
+        const isBarrier = d === 2 || d === 7;
+        const cell = document.createElement('div');
+        cell.className = 'prob-cell' + (isBarrier ? ' highlight' : '');
+        cell.style.cssText = 'background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px 6px;text-align:center;';
+        if (isBarrier) cell.style.borderColor = '#f0883e';
+        cell.innerHTML = `
+            <div style="font-size:22px;font-weight:700;color:${isBarrier ? '#f0883e' : overWin ? '#3fb950' : underWin ? '#58a6ff' : '#8b949e'}">
+                ${d}
+            </div>
+            <div style="font-size:13px;font-weight:600;color:#3fb950;">${overWin ? '✓ Over' : '—'}</div>
+            <div style="font-size:13px;font-weight:600;color:#58a6ff;">${underWin ? '✓ Under' : '—'}</div>
+            <div style="font-size:11px;color:#8b949e;">${f.pct}%</div>
+        `;
+        grid.appendChild(cell);
+    });
+}
+
+// ================================================================
+// ENTRIES
+// ================================================================
+function renderEntries(entries) {
+    const list = document.getElementById('entryList');
+    if (!entries || entries.length === 0) {
+        list.innerHTML = '<li style="color:#8b949e;justify-content:center;padding:20px;">No entries</li>';
+        return;
+    }
+    list.innerHTML = '';
+    entries.forEach(e => {
+        const li = document.createElement('li');
+        const cls = e.confidence >= 70 ? 'conf-high' : e.confidence >= 55 ? 'conf-med' : 'conf-low';
+        li.innerHTML = `
+            <div>
+                <span class="entry-action" style="color:${e.type === 'OVER' ? '#3fb950' : '#58a6ff'}">
+                    ${e.type === 'OVER' ? '📈 OVER 2' : '📉 UNDER 7'}
+                </span>
+                <span class="entry-detail"> — ${e.reasoning}</span>
+            </div>
+            <div><span class="entry-conf ${cls}">${e.confidence.toFixed(0)}%</span></div>
+        `;
+        list.appendChild(li);
+    });
+}
+
+// ================================================================
+// TICK HISTORY
+// ================================================================
+function renderTickHistory(history) {
+    const container = document.getElementById('tickHistory');
+    const countSpan = document.getElementById('historyCount');
+    
+    if (!history || history.length === 0) {
+        container.innerHTML = '<span style="color:#8b949e;font-size:13px;">Waiting for ticks...</span>';
+        countSpan.textContent = '(0)';
+        return;
+    }
+
+    countSpan.textContent = `(${history.length})`;
+    container.innerHTML = '';
+    
+    history.forEach((d, idx) => {
+        const dot = document.createElement('div');
+        dot.className = 'tick-dot';
+        if (idx === history.length - 1) dot.classList.add('recent');
+        if (d > 2 && d < 7) dot.style.borderColor = '#3fb950';
+        else if (d > 2) dot.style.borderColor = '#3fb950';
+        else if (d < 7) dot.style.borderColor = '#58a6ff';
+        dot.textContent = d;
+        container.appendChild(dot);
+    });
+
+    // Stats
+    const len = state.tickHistory.length;
+    if (len > 0) {
+        const over2 = state.tickHistory.filter(d => d > 2).length;
+        const under7 = state.tickHistory.filter(d => d < 7).length;
+        const evens = state.tickHistory.filter(d => d % 2 === 0).length;
+        const odds = state.tickHistory.filter(d => d % 2 === 1).length;
+        document.getElementById('statEvenOdd').textContent = `Even: ${evens} | Odd: ${odds}`;
+        document.getElementById('statOver2').textContent = `Over 2: ${over2}/${len}`;
+        document.getElementById('statUnder7').textContent = `Under 7: ${under7}/${len}`;
+    }
+}
+
+// ================================================================
+// TRADE LOG
+// ================================================================
+function renderTradeLog() {
+    const tbody = document.getElementById('tradeLogBody');
+    if (state.trades.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#8b949e;padding:20px;">No trades yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = state.trades.slice(0, 30).map(t => `
+        <tr>
+            <td style="color:#8b949e;">${t.entry_time ? new Date(t.entry_time * 1000).toLocaleTimeString() : '—'}</td>
+            <td>${t.contract_type === 'DIGITOVER' ? '📈 OVER' : '📉 UNDER'}</td>
+            <td>${t.entry_digit ?? '—'}</td>
+            <td>$${(t.stake || 0).toFixed(2)}</td>
+            <td class="${(t.profit || 0) >= 0 ? 'win' : 'loss'}">$${(t.profit || 0).toFixed(2)}</td>
+            <td><span class="${t.status === 'won' ? 'win' : 'loss'}">${t.status?.toUpperCase() || '—'}</span></td>
+        </tr>
+    `).join('');
+}
+
+// ================================================================
+// API CALLS
+// ================================================================
+async function fetchAPI(endpoint, options = {}) {
+    const res = await fetch(endpoint, {
+        headers: { 'Content-Type': 'application/json', ...options.headers },
+        ...options
+    });
+    return res.json();
+}
+
+async function connectAPI() {
+    const token = document.getElementById('apiTokenInput').value.trim();
+    if (!token) { showToast('Please enter an API token', 'error'); return; }
+    
+    const result = await fetchAPI('/api/auth', {
+        method: 'POST',
+        body: JSON.stringify({ token })
+    });
+    
+    if (result.error) showToast(result.error, 'error');
+    else showToast('Authenticating...', 'info');
+}
+
+async function subscribeSymbol(symbol) {
+    await fetchAPI('/api/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ symbol })
+    });
+}
+
+// ================================================================
+// VOLATILITY TABLE
+// ================================================================
+async function loadSymbols() {
+    const data = await fetchAPI('/api/symbols');
+    if (!data) return;
+    
+    // Populate select
+    const select = document.getElementById('marketSelect');
+    select.innerHTML = '';
+    
+    const categories = ['volatility', 'crash', 'boom', 'jump', 'other'];
+    const labels = { volatility: 'Volatility', crash: 'Crash', boom: 'Boom', jump: 'Jump', other: 'Other' };
+    
+    categories.forEach(cat => {
+        if (data[cat]) {
+            const grp = document.createElement('optgroup');
+            grp.label = labels[cat];
+            data[cat].forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.sym;
+                opt.textContent = s.name;
+                grp.appendChild(opt);
+            });
+            select.appendChild(grp);
+        }
+    });
+    
+    // Build table
+    const wrap = document.getElementById('volTableWrap');
+    let html = '<table class="vol-table"><thead><tr><th>Cat</th><th>Symbol</th><th>Name</th><th>Volatility</th></tr></thead><tbody>';
+    categories.forEach(cat => {
+        if (data[cat]) {
+            data[cat].forEach(s => {
+                html += `<tr><td><span style="font-size:11px;color:#8b949e;">${labels[cat]}</span></td>
+                    <td><span style="font-family:monospace;color:#7ee787;">${s.sym}</span></td>
+                    <td>${s.name}</td>
+                    <td><span style="font-size:11px;">${s.vol}</span></td></tr>`;
+            });
+        }
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+}
+
+// ================================================================
+// MARKET SWITCH
+// ================================================================
+async function switchMarket() {
+    const symbol = document.getElementById('marketSelect').value;
+    state.symbol = symbol;
+    state.tickHistory = [];
+    await subscribeSymbol(symbol);
+    showToast(`Switched to ${symbol}`, 'info');
+}
+
+// ================================================================
+// AUTO-TRADE
+// ================================================================
+async function toggleAutoTrade() {
+    if (!state.authenticated) {
+        showToast('Authenticate first', 'error');
+        return;
+    }
+    
+    if (state.isTrading) {
+        await fetchAPI('/api/trading/stop', { method: 'POST' });
+        state.isTrading = false;
+    } else {
+        await fetchAPI('/api/trading/start', { method: 'POST' });
+        state.isTrading = true;
+    }
+    updateAutoTradeUI();
+}
+
+async function stopTrading() {
+    await fetchAPI('/api/trading/stop', { method: 'POST' });
+    state.isTrading = false;
+    updateAutoTradeUI();
+    showToast('Trading stopped', 'info');
+}
+
+// ================================================================
+// TABS
+// ================================================================
+function initTabs() {
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', function() {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            this.classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(tc => tc.style.display = 'none');
+            document.getElementById('tab-' + this.dataset.tab).style.display = 'block';
+        });
+    });
+}
+
+// ================================================================
+// INIT
+// ================================================================
+document.addEventListener('DOMContentLoaded', async function() {
+    // Load symbols from API
+    await loadSymbols();
+    
+    // Init probability grid (static)
+    renderProbGrid(null);
+    
+    // Connect WebSocket
+    connectWS();
+    
+    // Init tabs
+    initTabs();
+    
+    // Event listeners
+    document.getElementById('connectBtn').addEventListener('click', connectAPI);
+    document.getElementById('disconnectBtn').addEventListener('click', () => {
+        document.getElementById('apiTokenInput').value = '';
+        showToast('Disconnected', 'info');
+    });
+    document.getElementById('marketSelect').addEventListener('change', switchMarket);
+    document.getElementById('autoTradeBtn').addEventListener('click', toggleAutoTrade);
+    document.getElementById('stopTradeBtn').addEventListener('click', stopTrading);
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+        subscribeSymbol(state.symbol);
+        showToast('Refreshing...', 'info');
+    });
+    
+    // Initial state
+    updateConnectionStatus(false);
+    updateAutoTradeUI();
+    
+    // Periodic trade log refresh
+    setInterval(() => {
+        if (state.trades.length > 0) renderTradeLog();
+    }, 5000);
+});
+</script>
+</body>
+</html>
 
         case 'trade_closed':
             state.activeTrades--;
