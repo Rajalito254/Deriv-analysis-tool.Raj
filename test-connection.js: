@@ -1,0 +1,55 @@
+const WebSocket = require('ws');
+
+const TOKEN = 'YOUR_TOKEN_HERE';  // paste your actual token
+const APP_ID = '1089';            // or your own app_id
+
+const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
+
+ws.on('open', () => {
+    console.log('✅ WebSocket connected');
+    console.log('🔑 Sending authorize...');
+    ws.send(JSON.stringify({ authorize: TOKEN }));
+});
+
+ws.on('message', (raw) => {
+    const data = JSON.parse(raw);
+    console.log('📨 Response:', JSON.stringify(data, null, 2));
+    
+    if (data.msg_type === 'authorize') {
+        if (data.authorize) {
+            console.log('✅ AUTHORIZED!');
+            console.log(`   Account: ${data.authorize.loginid}`);
+            console.log(`   Balance: ${data.authorize.balance} ${data.authorize.currency}`);
+            
+            // Try subscribing to ticks
+            ws.send(JSON.stringify({ ticks: 'R_50', subscribe: 1 }));
+        }
+        if (data.error) {
+            console.log('❌ AUTHORIZATION FAILED:', data.error.message);
+            console.log('   Code:', data.error.code);
+        }
+    }
+    
+    if (data.msg_type === 'tick') {
+        console.log(`📊 Tick: ${data.tick.symbol} = ${data.tick.quote}`);
+    }
+    
+    if (data.error) {
+        console.log('❌ ERROR:', data.error);
+    }
+});
+
+ws.on('error', (err) => {
+    console.log('❌ WEBSOCKET ERROR:', err.message);
+});
+
+ws.on('close', (code, reason) => {
+    console.log(`🔌 Connection closed: ${code} ${reason}`);
+});
+
+// Timeout after 10s
+setTimeout(() => {
+    console.log('⏱️ Timeout reached');
+    ws.close();
+    process.exit(0);
+}, 10000);
